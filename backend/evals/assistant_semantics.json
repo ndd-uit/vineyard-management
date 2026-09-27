@@ -1,0 +1,194 @@
+{
+  "purpose": "Developer-only conversation evaluation cases; not training data or backend routing rules.",
+  "notes": "Expected fields describe meaning, not guaranteed database IDs. Resolve named entities with lookup tools. Clarification is required when a mandatory fact is missing or meaning is ambiguous; lookup ambiguity depends on database results.",
+  "cases": [
+    {
+      "id": "owned_family_1",
+      "utterance": "vườn này nhà mình",
+      "context": "User is answering the acquisition-type question for a new season; garden and variety are resolved and status PLANNING was chosen.",
+      "expected_action": "create_season",
+      "key_fields": {"acquisition_type": "OWNED", "purchase_price": null},
+      "clarification_required": false
+    },
+    {
+      "id": "owned_family_2",
+      "utterance": "đợt này là nho nhà",
+      "context": "User is answering the acquisition-type question for a new season; garden and variety are resolved and status PLANNING was chosen.",
+      "expected_action": "create_season",
+      "key_fields": {"acquisition_type": "OWNED", "purchase_price": null},
+      "clarification_required": false
+    },
+    {
+      "id": "owned_family_3",
+      "utterance": "vườn mình trồng chứ không mua",
+      "context": "User is answering the acquisition-type question for a new season; garden and variety are resolved and status PLANNING was chosen.",
+      "expected_action": "create_season",
+      "key_fields": {"acquisition_type": "OWNED", "purchase_price": null},
+      "clarification_required": false
+    },
+    {
+      "id": "owned_family_4",
+      "utterance": "vườn của gia đình",
+      "context": "User is answering the acquisition-type question for a new season; garden and variety are resolved and status PLANNING was chosen.",
+      "expected_action": "create_season",
+      "key_fields": {"acquisition_type": "OWNED", "purchase_price": null},
+      "clarification_required": false
+    },
+    {
+      "id": "purchased_rights_1",
+      "utterance": "mua quyền cắt vườn này 20 triệu",
+      "context": "User is specifying acquisition type and price for a new season; garden and variety are resolved and status PLANNING was chosen.",
+      "expected_action": "create_season",
+      "key_fields": {"acquisition_type": "PURCHASED", "purchase_price": "20000000"},
+      "clarification_required": false
+    },
+    {
+      "id": "purchased_rights_2",
+      "utterance": "vườn người ta, mình mua lại đợt này",
+      "context": "User is specifying acquisition type for a new season; garden and variety are resolved and status PLANNING was chosen.",
+      "expected_action": "create_season",
+      "key_fields": {"acquisition_type": "PURCHASED", "purchase_price": null},
+      "clarification_required": false
+    },
+    {
+      "id": "purchased_rights_3",
+      "utterance": "mua vườn để thu hoạch vụ này",
+      "context": "User is specifying acquisition type for a new season; garden and variety are resolved and status PLANNING was chosen.",
+      "expected_action": "create_season",
+      "key_fields": {"acquisition_type": "PURCHASED", "purchase_price": null},
+      "clarification_required": false
+    },
+    {
+      "id": "harvest_1",
+      "utterance": "sáng nay cắt được 120 ký",
+      "context": "The active season is already unambiguous; today is supplied by the system clock.",
+      "expected_action": "record_harvest",
+      "key_fields": {"quantity_kg": "120", "harvest_date": "today"},
+      "clarification_required": false
+    },
+    {
+      "id": "harvest_2",
+      "utterance": "nay hái được hơn một tạ nho",
+      "context": "The active season is already unambiguous; today is supplied by the system clock.",
+      "expected_action": "record_harvest",
+      "key_fields": {"quantity_kg": null, "harvest_date": "today"},
+      "clarification_required": true,
+      "clarification_reason": "Hơn một tạ không phải số ký chính xác."
+    },
+    {
+      "id": "harvest_3",
+      "utterance": "vườn A hôm nay thu 80kg",
+      "context": "Garden A has one active season; today is supplied by the system clock.",
+      "expected_action": "record_harvest",
+      "key_fields": {"garden_name": "A", "quantity_kg": "80", "harvest_date": "today"},
+      "clarification_required": false
+    },
+    {
+      "id": "sale_1",
+      "utterance": "Lan lấy 30 ký giá 80",
+      "context": "Customer Lan and the harvest are already resolved.",
+      "expected_action": "record_sale",
+      "key_fields": {"customer_name": "Lan", "quantity_kg": "30", "unit_price": null},
+      "clarification_required": true,
+      "clarification_reason": "Giá 80 chưa rõ đơn vị tiền."
+    },
+    {
+      "id": "sale_2",
+      "utterance": "bán cô Lan 30kg, tám chục một ký",
+      "context": "Customer Lan and the harvest are already resolved.",
+      "expected_action": "record_sale",
+      "key_fields": {"customer_name": "Cô Lan", "quantity_kg": "30", "unit_price": null},
+      "clarification_required": true,
+      "clarification_reason": "Tám chục một ký chưa rõ là đồng hay nghìn đồng."
+    },
+    {
+      "id": "sale_3",
+      "utterance": "cô Lan lấy 2 thùng tổng 25 ký giá 75",
+      "context": "Customer Lan and the harvest are already resolved.",
+      "expected_action": "record_sale",
+      "key_fields": {"customer_name": "Cô Lan", "quantity_kg": "25", "unit_price": null},
+      "clarification_required": true,
+      "clarification_reason": "Dùng tổng 25 ký, không suy ra khối lượng từ thùng; giá 75 chưa rõ đơn vị."
+    },
+    {
+      "id": "customer_payment_1",
+      "utterance": "Lan trả 1 triệu",
+      "context": "Customer Lan is resolved; the date of payment was not stated.",
+      "expected_action": "record_customer_payment",
+      "key_fields": {"customer_name": "Lan", "amount": "1000000"},
+      "clarification_required": true,
+      "clarification_reason": "Cần ngày thanh toán để ghi bản ghi."
+    },
+    {
+      "id": "customer_payment_2",
+      "utterance": "cô Lan gửi trước 500 ngàn",
+      "context": "Customer Lan is resolved; the date of payment was not stated.",
+      "expected_action": "record_customer_payment",
+      "key_fields": {"customer_name": "Cô Lan", "amount": "500000"},
+      "clarification_required": true,
+      "clarification_reason": "Tiền gửi trước là thanh toán công nợ chung; cần ngày thanh toán."
+    },
+    {
+      "id": "labor_1",
+      "utterance": "Tâm cắt nho hôm nay công 500",
+      "context": "Worker Tâm and the season are resolved; today is supplied by the system clock.",
+      "expected_action": "record_labor",
+      "key_fields": {"worker_name": "Tâm", "work_type": "Cắt nho", "work_date": "today", "amount": null},
+      "clarification_required": true,
+      "clarification_reason": "Tiền công 500 chưa rõ đơn vị."
+    },
+    {
+      "id": "labor_2",
+      "utterance": "trả công làm cỏ cho Tâm 400 ngàn",
+      "context": "Worker Tâm and the season are resolved.",
+      "expected_action": null,
+      "key_fields": {"worker_name": "Tâm", "work_type": "Làm cỏ", "amount": "400000"},
+      "clarification_required": true,
+      "clarification_reason": "Cần phân biệt ghi công phát sinh với trả tiền công đã đưa; nếu ghi công còn cần ngày làm."
+    },
+    {
+      "id": "worker_payment_1",
+      "utterance": "mẹ trả Tâm 300 ngàn tiền công",
+      "context": "Worker Tâm is resolved; the payment date was not stated.",
+      "expected_action": "record_worker_payment",
+      "key_fields": {"worker_name": "Tâm", "amount": "300000"},
+      "clarification_required": true,
+      "clarification_reason": "Cần ngày trả tiền."
+    },
+    {
+      "id": "expense_1",
+      "utterance": "mua phân hết 700",
+      "context": "The season is resolved; expense date was not stated.",
+      "expected_action": "record_expense",
+      "key_fields": {"category": "Phân bón", "amount": null},
+      "clarification_required": true,
+      "clarification_reason": "Giá 700 chưa rõ đơn vị và cần ngày phát sinh."
+    },
+    {
+      "id": "expense_2",
+      "utterance": "tiền thuốc hôm nay 450 ngàn",
+      "context": "The season is resolved; today is supplied by the system clock.",
+      "expected_action": "record_expense",
+      "key_fields": {"category": "Thuốc", "amount": "450000", "expense_date": "today"},
+      "clarification_required": false
+    },
+    {
+      "id": "ambiguous_tam",
+      "utterance": "Tâm 500 ngàn",
+      "context": "Worker Tâm exists but no operation was specified.",
+      "expected_action": null,
+      "key_fields": {"worker_name": "Tâm", "amount": "500000"},
+      "clarification_required": true,
+      "clarification_reason": "Có thể là tiền công phát sinh hoặc khoản đã trả."
+    },
+    {
+      "id": "ambiguous_lan",
+      "utterance": "Lan 1 triệu",
+      "context": "Customer Lan exists but no operation was specified.",
+      "expected_action": null,
+      "key_fields": {"customer_name": "Lan", "amount": "1000000"},
+      "clarification_required": true,
+      "clarification_reason": "Có thể là giao dịch bán hoặc khoản khách đã trả."
+    }
+  ]
+}
