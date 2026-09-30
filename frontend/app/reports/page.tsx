@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import StatCard from "@/components/dashboard/StatCard";
 import { PageGrapeLoader } from "@/components/ui/GrapeLoaders";
-import { apiGet } from "@/lib/api";
+import { ApiError, apiGet } from "@/lib/api";
 import { formatMoney } from "@/lib/format";
 import type { Overview } from "@/types/api";
 
@@ -12,20 +12,20 @@ type WorkerDebt = { worker_name: string; outstanding_amount: string };
 
 export default function ReportsPage() {
   const [data, setData] = useState<{ overview: Overview; customers: CustomerDebt[]; workers: WorkerDebt[] } | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     Promise.all([
       apiGet<Overview>("reports/overview"),
       apiGet<CustomerDebt[]>("reports/customer-receivables"),
       apiGet<WorkerDebt[]>("reports/worker-payables"),
-    ]).then(([overview, customers, workers]) => setData({ overview, customers, workers })).catch(() => setError(true));
+    ]).then(([overview, customers, workers]) => setData({ overview, customers, workers })).catch((cause) => setError(cause instanceof ApiError ? cause.message : new ApiError().message));
   }, []);
 
   return (
     <div className="page-stack">
       <div className="page-heading"><span className="eyebrow">NHÌN LẠI MÙA NHO</span><h1>Báo cáo</h1><p>Các con số dưới đây được tính từ những khoản đã ghi.</p></div>
-      {error ? <div className="state-card" role="alert">Không kết nối được với hệ thống. Mẹ thử lại sau nhé.</div> : !data ? <PageGrapeLoader message="Con đang lấy báo cáo cho mẹ..." /> : (
+      {error ? <div className="state-card" role="alert">{error}</div> : !data ? <PageGrapeLoader message="Con đang lấy báo cáo cho mẹ..." /> : (
         <>
           <div className="stats-grid">
             <StatCard label="Doanh thu bán hàng" value={formatMoney(data.overview.total_sales_revenue)} />

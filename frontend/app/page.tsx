@@ -5,16 +5,16 @@ import Image from "next/image";
 import { useEffect, useState } from "react";
 import StatCard from "@/components/dashboard/StatCard";
 import { PageGrapeLoader } from "@/components/ui/GrapeLoaders";
-import { apiGet } from "@/lib/api";
+import { ApiError, apiGet } from "@/lib/api";
 import { formatKg, formatMoney } from "@/lib/format";
 import type { Overview } from "@/types/api";
 
 export default function Home() {
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    apiGet<Overview>("reports/overview").then(setOverview).catch(() => setError(true));
+    apiGet<Overview>("reports/overview").then(setOverview).catch((cause) => setError(cause instanceof ApiError ? cause.message : new ApiError().message));
   }, []);
 
   return (
@@ -31,7 +31,7 @@ export default function Home() {
 
       <section aria-labelledby="overview-title">
         <div className="section-heading"><div><span className="eyebrow">NHÌN NHANH</span><h2 id="overview-title">Tình hình vườn nho</h2></div><Link href="/reports">Xem báo cáo →</Link></div>
-        {error ? <div className="state-card" role="alert">Không kết nối được với hệ thống. Mẹ thử lại sau nhé.</div> : !overview ? <PageGrapeLoader /> : (
+        {error ? <div className="state-card" role="alert">{error}</div> : !overview ? <PageGrapeLoader /> : (
           <div className="stats-grid">
             <StatCard label="Tổng thu hoạch" value={formatKg(overview.total_harvest_kg)} tone="green" />
             <StatCard label="Đã bán" value={formatKg(overview.total_sold_kg)} />

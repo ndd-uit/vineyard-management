@@ -1,7 +1,8 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import text
 
 from app.database import engine
+from app.auth import get_current_user
 from app.routers.assistant_actions import router as assistant_actions_router
 from app.routers.assistant_chat import router as assistant_chat_router
 from app.routers.customer_payments import router as customer_payments_router
@@ -20,30 +21,19 @@ from app.routers.workers import router as workers_router
 
 app = FastAPI(
     title="Vineyard Management API",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
-app.include_router(gardens_router)
-app.include_router(grape_varieties_router)
-app.include_router(seasons_router)
-app.include_router(harvests_router)
-app.include_router(customers_router)
-app.include_router(sales_router)
-app.include_router(customer_payments_router)
-app.include_router(workers_router)
-app.include_router(labor_records_router)
-app.include_router(worker_payments_router)
-app.include_router(expenses_router)
-app.include_router(reports_router)
-app.include_router(assistant_actions_router)
-app.include_router(assistant_chat_router)
-
-
-@app.get("/")
-def root():
-    return {
-        "message": "Vineyard Management API is running"
-    }
+for router in (
+    gardens_router, grape_varieties_router, seasons_router, harvests_router,
+    customers_router, sales_router, customer_payments_router, workers_router,
+    labor_records_router, worker_payments_router, expenses_router, reports_router,
+    assistant_actions_router, assistant_chat_router,
+):
+    app.include_router(router, dependencies=[Depends(get_current_user)])
 
 
 @app.get("/health")
@@ -53,19 +43,13 @@ def health():
     }
 
 
-@app.get("/db-health")
+@app.get("/db-health", dependencies=[Depends(get_current_user)])
 def db_health():
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
 
-        return {
-            "database": "connected",
-            "provider": "Neon PostgreSQL"
-        }
+        return {"database": "connected"}
 
-    except Exception as error:
-        return {
-            "database": "error",
-            "detail": str(error)
-        }
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database unavailable.") from None

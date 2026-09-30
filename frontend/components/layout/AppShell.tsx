@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { SignOutButton, useAuth } from "@clerk/nextjs";
 
 const links = [
   { href: "/", label: "Trang chủ" },
@@ -19,6 +20,11 @@ const links = [
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  const { isSignedIn } = useAuth();
+
+  if (pathname.startsWith("/sign-in")) {
+    return <main className="main-content">{children}</main>;
+  }
 
   return (
     <div className="app-shell">
@@ -41,6 +47,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
         <div className="sidebar-note">Mọi khoản ghi lại đều cần mẹ xác nhận trước khi lưu.</div>
+        {isSignedIn && <SignOutButton><button type="button" className="nav-link">Đăng xuất</button></SignOutButton>}
       </aside>
 
       <div className="main-column">

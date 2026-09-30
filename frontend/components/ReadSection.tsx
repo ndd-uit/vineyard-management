@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { PageGrapeLoader } from "@/components/ui/GrapeLoaders";
-import { apiGet } from "@/lib/api";
+import { ApiError, apiGet } from "@/lib/api";
 import { formatDate, formatKg, formatMoney } from "@/lib/format";
 
 type Section = "gardens" | "harvests" | "customers" | "workers" | "finances";
@@ -80,18 +80,18 @@ async function loadRows(section: Section): Promise<Row[]> {
 
 export default function ReadSection({ section }: { section: Section }) {
   const [rows, setRows] = useState<Row[] | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState("");
   const copy = sections[section];
 
   useEffect(() => {
-    loadRows(section).then(setRows).catch(() => setError(true));
+    loadRows(section).then(setRows).catch((cause) => setError(cause instanceof ApiError ? cause.message : new ApiError().message));
   }, [section]);
 
   return (
     <div className="page-stack">
       <div className="page-heading"><span className="eyebrow">SỔ TAY VƯỜN NHO</span><h1>{copy.title}</h1><p>{copy.intro}</p></div>
       <div className="section-heading"><h2>Đã ghi nhận</h2><Link href="/assistant">Nhờ trợ lý ghi thêm →</Link></div>
-      {error ? <div className="state-card" role="alert">Không kết nối được với hệ thống. Mẹ thử lại sau nhé.</div> : rows === null ? <PageGrapeLoader /> : rows.length === 0 ? <div className="state-card">{copy.empty}</div> : (
+      {error ? <div className="state-card" role="alert">{error}</div> : rows === null ? <PageGrapeLoader /> : rows.length === 0 ? <div className="state-card">{copy.empty}</div> : (
         <div className="record-list">
           {rows.map((row, index) => <article className="record-card" key={`${row.title}-${index}`}><div><h3>{row.title}</h3>{row.detail && <p>{row.detail}</p>}</div>{row.value && <strong>{row.value}</strong>}</article>)}
         </div>

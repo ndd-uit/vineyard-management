@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
+from app.auth import AuthenticatedUser, get_current_user
 from app.main import app
 from app.models import (
     Customer,
@@ -42,6 +43,7 @@ def client():
             yield db
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(sub="test-user")
     try:
         with TestClient(app) as test_client:
             yield test_client
@@ -254,7 +256,7 @@ def test_reject_nonpositive_payment(client: TestClient, amount: str):
 def test_new_crud_routes_are_registered(
     client: TestClient, collection: str, detail: str
 ):
-    paths = client.get("/openapi.json").json()["paths"]
+    paths = app.openapi()["paths"]
     assert set(paths[f"/api/{collection}"]) == {"get", "post"}
     assert set(paths[f"/api/{collection}/{{{detail}}}"]) == {
         "get", "patch", "delete"

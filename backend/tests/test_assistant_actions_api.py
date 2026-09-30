@@ -2,13 +2,18 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
+from app.auth import AuthenticatedUser, get_current_user
 from app.main import app
+from app.schemas.assistant_actions import WriteAction
+from app.services import assistant_actions
 from app.models import (
     Customer,
     CustomerPayment,
@@ -38,6 +43,7 @@ def client_and_engine():
             yield db
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(sub="test-user")
     try:
         with TestClient(app) as client:
             yield client, engine
@@ -90,6 +96,13 @@ def action(action_name, **arguments):
     return {"action": action_name, "arguments": arguments}
 
 
+def execute_internal(engine, payload):
+    """Exercise the service without exposing its unsafe legacy HTTP endpoint."""
+    validated = TypeAdapter(WriteAction).validate_python(payload)
+    with Session(engine) as db:
+        return assistant_actions.execute(db, validated)
+
+
 def test_find_grape_varieties_exact_partial_and_missing(client_and_engine):
     client, engine = client_and_engine
     with Session(engine) as db:
@@ -139,10 +152,9 @@ def test_create_season_action_previews_confirms_and_revalidates(client_and_engin
     assert len(preview.json()["action_token"]) == 64
     assert count(engine, Season) == 1
     unconfirmed = client.post("/api/assistant/actions/execute", json=action("create_season", **arguments))
-    assert unconfirmed.status_code == 422
-    confirmed = client.post("/api/assistant/actions/execute", json={**action("create_season", **arguments), "confirmed": True})
-    assert confirmed.status_code == 200
-    assert confirmed.json()["resource_type"] == "seasons"
+    assert unconfirmed.status_code == 404
+    confirmed = execute_internal(engine, {**action("create_season", **arguments), "confirmed": True})
+    assert confirmed.resource_type == "seasons"
     assert count(engine, Season) == 2
 
 
@@ -268,9 +280,13 @@ def test_invalid_previews_and_confirmation_never_write(client_and_engine):
     assert bad.status_code == 422
     assert count(engine, Harvest) == 1
     payload = action("record_harvest", season_id=ids["season_id"], harvest_date="2026-09-02", quantity_kg="1.00")
-    assert client.post("/api/assistant/actions/execute", json=payload).status_code == 422
-    assert client.post("/api/assistant/actions/execute", json={**payload, "confirmed": False}).status_code == 422
-    assert client.post("/api/assistant/actions/execute", json={**payload, "confirmed": "true"}).status_code == 422
+    assert client.post("/api/assistant/actions/execute", json=payload).status_code == 404
+    with pytest.raises(HTTPException):
+        execute_internal(engine, payload)
+    with pytest.raises(HTTPException):
+        execute_internal(engine, {**payload, "confirmed": False})
+    with pytest.raises(ValidationError):
+        execute_internal(engine, {**payload, "confirmed": "true"})
     assert count(engine, Harvest) == 1
 
 
@@ -293,19 +309,15 @@ def test_confirmed_action_creates_exactly_one_record(client_and_engine, name, ar
     ids = seed(engine)
     values = {key: ids.get(value, value) for key, value in arguments.items()}
     before = count(engine, model)
-    response = client.post(
-        "/api/assistant/actions/execute",
-        json={**action(name, **values), "confirmed": True},
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["resource_id"] > 0
-    assert response.json()["message"] == "Con đã ghi lại rồi ạ."
+    response = execute_internal(engine, {**action(name, **values), "confirmed": True})
+    assert response.resource_id > 0
+    assert response.message == "Con đã ghi lại rồi ạ."
     assert count(engine, model) == before + 1
     if name == "record_sale":
         with Session(engine) as db:
-            sale = db.get(Sale, response.json()["resource_id"])
+            sale = db.get(Sale, response.resource_id)
             assert sale.total_amount == Decimal("14.50")
-        assert response.json()["result"]["total_amount"] == "14.50"
+        assert response.result["total_amount"] == "14.50"
 
 
 def test_execute_revalidates_changed_harvest_availability(client_and_engine):
@@ -316,8 +328,9 @@ def test_execute_revalidates_changed_harvest_availability(client_and_engine):
     with Session(engine) as db:
         db.add(Sale(harvest_id=ids["harvest_id"], customer_id=ids["customer_id"], sale_date=date(2026, 9, 2), quantity_kg=Decimal("6.00"), unit_price=Decimal("2.00"), total_amount=Decimal("12.00")))
         db.commit()
-    response = client.post("/api/assistant/actions/execute", json={**payload, "confirmed": True})
-    assert response.status_code == 422
+    with pytest.raises(HTTPException) as error:
+        execute_internal(engine, {**payload, "confirmed": True})
+    assert error.value.status_code == 422
     assert count(engine, Sale) == 1
 
 
@@ -326,10 +339,12 @@ def test_sale_capacity_and_labor_expense_rules(client_and_engine):
     ids = seed(engine)
     oversized = action("record_sale", harvest_id=ids["harvest_id"], customer_id=ids["customer_id"], sale_date="2026-09-02", quantity_kg="11.00", unit_price="1.00")
     assert client.post("/api/assistant/actions/preview", json=oversized).status_code == 422
-    assert client.post("/api/assistant/actions/execute", json={**oversized, "confirmed": True}).status_code == 422
+    with pytest.raises(HTTPException):
+        execute_internal(engine, {**oversized, "confirmed": True})
     labor_expense = action("record_expense", season_id=ids["season_id"], expense_date="2026-09-02", category="Tiền công", amount="10.00")
     assert client.post("/api/assistant/actions/preview", json=labor_expense).status_code == 422
-    assert client.post("/api/assistant/actions/execute", json={**labor_expense, "confirmed": True}).status_code == 422
+    with pytest.raises(HTTPException):
+        execute_internal(engine, {**labor_expense, "confirmed": True})
     assert count(engine, Sale) == 0
     assert count(engine, Expense) == 0
 
@@ -368,12 +383,13 @@ def test_query_reuses_reports(client_and_engine):
 
 def test_unknown_action_and_arbitrary_function_are_rejected(client_and_engine):
     client, engine = client_and_engine
-    for endpoint in ("/api/assistant/actions/preview", "/api/assistant/actions/execute", "/api/assistant/query"):
+    for endpoint in ("/api/assistant/actions/preview", "/api/assistant/query"):
         payload = action("__import__", command="drop everything")
         if endpoint.endswith("execute"):
             payload["confirmed"] = True
         assert client.post(endpoint, json=payload).status_code == 422
     assert count(engine, Garden) == 0
+    assert client.post("/api/assistant/actions/execute", json={"confirmed": True}).status_code == 404
 
 
 def test_unknown_argument_cannot_override_backend_calculated_total(client_and_engine):
@@ -389,5 +405,6 @@ def test_unknown_argument_cannot_override_backend_calculated_total(client_and_en
         total_amount="0.01",
     )
     assert client.post("/api/assistant/actions/preview", json=payload).status_code == 422
-    assert client.post("/api/assistant/actions/execute", json={**payload, "confirmed": True}).status_code == 422
+    with pytest.raises(ValidationError):
+        execute_internal(engine, {**payload, "confirmed": True})
     assert count(engine, Sale) == 0

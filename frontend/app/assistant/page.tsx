@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import { ChatGrapeLoader } from "@/components/ui/GrapeLoaders";
-import { apiPost } from "@/lib/api";
+import { ApiError, apiPost } from "@/lib/api";
 import type { ChatHistoryItem, ChatResponse, PendingAction } from "@/types/api";
 
 type Message = ChatHistoryItem & { type?: ChatResponse["type"]; preview?: PendingAction; options?: { label: string; value: string }[] };
@@ -50,8 +50,8 @@ export default function AssistantPage() {
       setMessages((current) => [...current, { role: "user", message }, reply]);
       setPendingAction(response.pending_action);
       setDraft("");
-    } catch {
-      setError("Không kết nối được với hệ thống. Mẹ thử lại sau nhé.");
+    } catch (error) {
+      setError(error instanceof ApiError ? error.message : new ApiError().message);
     } finally {
       busyRef.current = false;
       setBusy(false);

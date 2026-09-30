@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
+from app.auth import AuthenticatedUser, get_current_user
 from app.main import app
 from app.models import (
     Customer,
@@ -37,6 +38,7 @@ def report_client():
             yield db
 
         app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(sub="test-user")
         try:
             with TestClient(app) as client:
                 yield client, db

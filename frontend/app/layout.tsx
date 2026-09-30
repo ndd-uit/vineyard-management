@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import AppShell from "@/components/layout/AppShell";
+import { ClerkProvider } from "@clerk/nextjs";
 import "@fontsource/be-vietnam-pro/400.css";
 import "@fontsource/be-vietnam-pro/500.css";
 import "@fontsource/be-vietnam-pro/600.css";
@@ -20,7 +21,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="vi">
-      <body><AppShell>{children}</AppShell></body>
+      <body><ClerkProvider><AppShell>{children}</AppShell></ClerkProvider></body>
     </html>
   );
 }
