@@ -1,25 +1,22 @@
-"""Process-local protection for confirmed assistant actions.
-
-This is intentionally not cross-instance idempotency. A persistent store or
-database constraint is required before running multiple backend instances.
-"""
+"""Canonical assistant payloads and stable, user-bound preview signatures."""
 
 import hashlib
 import hmac
 import json
-import secrets
-import threading
-import time
-from collections import OrderedDict
-from datetime import date, datetime
+import os
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any
+from uuid import UUID, uuid4
+
+from fastapi import HTTPException, status
 
 from app.schemas.assistant_actions import WriteAction
 
 
-_SIGNING_KEY = secrets.token_bytes(32)
+PREVIEW_LIFETIME = timedelta(minutes=15)
+TOKEN_VERSION = "v1"
 
 
 def _canonical(value: Any) -> Any:
@@ -36,55 +33,59 @@ def _canonical(value: Any) -> Any:
     return value
 
 
-def action_token(action: WriteAction) -> str:
-    payload = {
+def _encoded(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def canonical_action(action: WriteAction) -> bytes:
+    return _encoded({
         "action": action.action,
         "arguments": _canonical(action.arguments.model_dump(exclude_none=True)),
-    }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hmac.new(_SIGNING_KEY, encoded, hashlib.sha256).hexdigest()
+    })
 
 
-def token_matches(action: WriteAction, token: str) -> bool:
-    return hmac.compare_digest(action_token(action), token)
+def payload_hash(action: WriteAction) -> str:
+    return hashlib.sha256(canonical_action(action)).hexdigest()
 
 
-class RecentActionCache:
-    def __init__(self, max_entries: int = 512, ttl_seconds: int = 300) -> None:
-        self.max_entries = max_entries
-        self.ttl_seconds = ttl_seconds
-        self._lock = threading.Lock()
-        self._executed: OrderedDict[str, float] = OrderedDict()
-        self._in_progress: set[str] = set()
-
-    def _prune(self, now: float) -> None:
-        while self._executed:
-            _, timestamp = next(iter(self._executed.items()))
-            if now - timestamp <= self.ttl_seconds:
-                break
-            self._executed.popitem(last=False)
-
-    def begin(self, token: str) -> str:
-        with self._lock:
-            self._prune(time.monotonic())
-            if token in self._executed:
-                return "executed"
-            if token in self._in_progress:
-                return "in_progress"
-            self._in_progress.add(token)
-            return "new"
-
-    def finish(self, token: str) -> None:
-        with self._lock:
-            self._in_progress.discard(token)
-            self._executed[token] = time.monotonic()
-            self._executed.move_to_end(token)
-            while len(self._executed) > self.max_entries:
-                self._executed.popitem(last=False)
-
-    def release(self, token: str) -> None:
-        with self._lock:
-            self._in_progress.discard(token)
+def _signing_key() -> bytes:
+    value = os.getenv("ASSISTANT_ACTION_SIGNING_KEY", "")
+    key = value.encode("utf-8")
+    if len(key) < 32 or value == "replace_with_long_random_secret":
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Trợ lý chưa thể xác nhận lúc này. Mẹ thử lại sau nhé.",
+        )
+    return key
 
 
-recent_actions = RecentActionCache()
+def new_preview_identity() -> tuple[UUID, datetime]:
+    return uuid4(), datetime.now(UTC).replace(microsecond=0) + PREVIEW_LIFETIME
+
+
+def action_token(
+    action: WriteAction, *, user_id: str, idempotency_key: UUID, expires_at: datetime
+) -> str:
+    if expires_at.tzinfo is None:
+        raise ValueError("Preview expiry must include a timezone")
+    signed_payload = _encoded({
+        "version": TOKEN_VERSION,
+        "user_id": user_id,
+        "idempotency_key": str(idempotency_key),
+        "expires_at": int(expires_at.timestamp()),
+        "action": json.loads(canonical_action(action)),
+    })
+    digest = hmac.new(_signing_key(), signed_payload, hashlib.sha256).hexdigest()
+    return f"{TOKEN_VERSION}.{digest}"
+
+
+def token_matches(
+    action: WriteAction, token: str, *, user_id: str,
+    idempotency_key: UUID, expires_at: datetime,
+) -> bool:
+    if expires_at.tzinfo is None or datetime.now(UTC) >= expires_at:
+        return False
+    expected = action_token(
+        action, user_id=user_id, idempotency_key=idempotency_key, expires_at=expires_at
+    )
+    return hmac.compare_digest(expected, token)

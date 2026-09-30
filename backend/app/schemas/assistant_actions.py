@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, model_validator
 
@@ -145,6 +146,8 @@ class PendingActionPreview(BaseModel):
     arguments: dict[str, Any]
     summary: str
     action_token: str
+    idempotency_key: UUID
+    expires_at: datetime
     calculated: dict[str, Any] = Field(default_factory=dict)
     requires_confirmation: Literal[True] = True
 

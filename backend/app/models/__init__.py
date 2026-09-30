@@ -1,3 +1,4 @@
+from app.models.assistant_action_execution import AssistantActionExecution
 from app.models.customer import Customer
 from app.models.customer_payment import CustomerPayment
 from app.models.expense import Expense
@@ -11,6 +12,7 @@ from app.models.worker import Worker
 from app.models.worker_payment import WorkerPayment
 
 __all__ = [
+    "AssistantActionExecution",
     "AcquisitionType",
     "Customer",
     "CustomerPayment",

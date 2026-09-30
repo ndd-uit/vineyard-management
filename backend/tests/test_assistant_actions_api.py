@@ -30,7 +30,8 @@ from app.models import (
 
 
 @pytest.fixture
-def client_and_engine():
+def client_and_engine(monkeypatch):
+    monkeypatch.setenv("ASSISTANT_ACTION_SIGNING_KEY", "test-only-signing-key-at-least-32-bytes")
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -149,7 +150,7 @@ def test_create_season_action_previews_confirms_and_revalidates(client_and_engin
     preview = client.post("/api/assistant/actions/preview", json=action("create_season", **arguments))
     assert preview.status_code == 200
     assert preview.json()["action"] == "create_season"
-    assert len(preview.json()["action_token"]) == 64
+    assert preview.json()["action_token"].startswith("v1.")
     assert count(engine, Season) == 1
     unconfirmed = client.post("/api/assistant/actions/execute", json=action("create_season", **arguments))
     assert unconfirmed.status_code == 404

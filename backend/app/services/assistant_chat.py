@@ -12,6 +12,7 @@ from app.schemas.assistant_chat import ChatRequest, ChatResponse, ChatResponseTy
 from app.services import assistant_actions
 from app.services import action_tokens
 from app.services import assistant_presentation
+from app.services import assistant_execution
 
 
 _WRITE_ADAPTER = TypeAdapter(WriteAction)
@@ -97,7 +98,7 @@ def _explicit_create(message: str) -> tuple[ToolCall, bool] | ChatResponse | Non
     return None
 
 
-def _handle_call(db: Session, call: ToolCall, *, allow_duplicate: bool = False) -> tuple[ChatResponse | None, dict[str, Any] | None]:
+def _handle_call(db: Session, call: ToolCall, *, user_id: str, allow_duplicate: bool = False) -> tuple[ChatResponse | None, dict[str, Any] | None]:
     if call.name in _WRITE_NAMES:
         try:
             if call.name == "create_season" and not call.arguments.get("acquisition_type"):
@@ -120,8 +121,12 @@ def _handle_call(db: Session, call: ToolCall, *, allow_duplicate: bool = False) 
                         f"Đã có {label} tên gần giống: {options}. Mẹ muốn dùng mục này hay vẫn tạo mới?",
                         matches,
                     ), None
-            preview = assistant_actions.preview(db, request)
-        except (ValidationError, HTTPException):
+            preview = assistant_actions.preview(db, request, user_id=user_id)
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                raise
+            return _clarification("Thông tin chưa đủ hoặc chưa hợp lệ. Mẹ kiểm tra lại giúp mình nhé."), None
+        except ValidationError:
             return _clarification("Thông tin chưa đủ hoặc chưa hợp lệ. Mẹ kiểm tra lại giúp mình nhé."), None
         return ChatResponse(
             type=ChatResponseType.ACTION_PREVIEW,
@@ -149,7 +154,7 @@ def _handle_call(db: Session, call: ToolCall, *, allow_duplicate: bool = False) 
     return _clarification("Con chưa hỗ trợ yêu cầu đó. Mẹ nói lại theo cách khác nhé?"), None
 
 
-def chat(db: Session, provider: GeminiProvider, request: ChatRequest) -> ChatResponse:
+def chat(db: Session, provider: GeminiProvider, request: ChatRequest, *, user_id: str) -> ChatResponse:
     history = [(item.role, item.message) for item in request.history]
     if request.pending_action is not None:
         intent = _intent(request.message)
@@ -161,25 +166,26 @@ def chat(db: Session, provider: GeminiProvider, request: ChatRequest) -> ChatRes
                 )
             except (ValidationError, HTTPException):
                 return _clarification("Bản ghi này không còn hợp lệ. Mẹ kiểm tra và xem trước lại nhé?")
-            if not action_tokens.token_matches(action, pending.action_token):
+            if not action_tokens.token_matches(
+                action, pending.action_token, user_id=user_id,
+                idempotency_key=pending.idempotency_key, expires_at=pending.expires_at,
+            ):
                 return _clarification("Bản nháp đã bị thay đổi. Mẹ xem trước lại trước khi xác nhận nhé?")
-            state = action_tokens.recent_actions.begin(pending.action_token)
-            if state == "executed":
-                return ChatResponse(type=ChatResponseType.MESSAGE, message="Bản ghi này đã được lưu trước đó, mình không ghi thêm lần nữa.")
-            if state == "in_progress":
-                return ChatResponse(type=ChatResponseType.MESSAGE, message="Bản ghi này đang được xử lý, mình không ghi thêm lần nữa.")
             try:
-                executed = assistant_actions.execute(db, action)
+                executed, duplicate = assistant_execution.execute_confirmed(
+                    db, user_id=user_id, pending=pending, action=action
+                )
             except (ValidationError, HTTPException):
-                action_tokens.recent_actions.release(pending.action_token)
                 return _clarification("Bản ghi này không còn hợp lệ. Mẹ kiểm tra và xem trước lại nhé?")
-            except Exception:
-                action_tokens.recent_actions.release(pending.action_token)
-                raise
-            action_tokens.recent_actions.finish(pending.action_token)
+            if executed is None:
+                return ChatResponse(
+                    type=ChatResponseType.MESSAGE,
+                    message="Bản ghi này đang được xử lý. Mẹ thử lại sau nhé.",
+                    pending_action=pending,
+                )
             return ChatResponse(
                 type=ChatResponseType.ACTION_EXECUTED,
-                message=executed.message,
+                message=("Bản ghi này đã được lưu trước đó, con không ghi thêm lần nữa." if duplicate else executed.message),
                 data=executed.model_dump(mode="json"),
             )
         if intent == "reject":
@@ -197,7 +203,7 @@ def chat(db: Session, provider: GeminiProvider, request: ChatRequest) -> ChatRes
         return explicit_create
     if explicit_create is not None:
         call, allow_duplicate = explicit_create
-        response, _ = _handle_call(db, call, allow_duplicate=allow_duplicate)
+        response, _ = _handle_call(db, call, user_id=user_id, allow_duplicate=allow_duplicate)
         return response
 
     turn = provider.start(request.message, history)
@@ -214,7 +220,7 @@ def chat(db: Session, provider: GeminiProvider, request: ChatRequest) -> ChatRes
             return _clarification("Mẹ giúp con làm từng việc một nhé?")
         results = []
         for call in turn.calls:
-            answer, feedback = _handle_call(db, call)
+            answer, feedback = _handle_call(db, call, user_id=user_id)
             if answer is not None:
                 return answer
             results.append((call.name, feedback))

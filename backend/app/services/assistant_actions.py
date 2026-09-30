@@ -4,6 +4,7 @@ from typing import Any
 import unicodedata
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -56,7 +57,7 @@ from app.schemas.grape_variety import GrapeVarietyRead
 from app.schemas.season import SeasonRead
 from app.schemas.worker import WorkerRead
 from app.services import report
-from app.services.action_tokens import action_token
+from app.services import action_tokens
 from app.services.assistant_presentation import action_summary
 from app.services.expense import validate_expense_category
 from app.services.sale import validate_sale_and_total
@@ -127,19 +128,24 @@ _WRITE_TARGETS = {
 }
 
 
-def preview(db: Session, request: WriteAction) -> PendingActionPreview:
+def preview(db: Session, request: WriteAction, *, user_id: str) -> PendingActionPreview:
     summary, derived = _validate_write(db, request)
     arguments = request.arguments.model_dump(mode="json", exclude_none=True)
+    idempotency_key, expires_at = action_tokens.new_preview_identity()
     return PendingActionPreview(
         action=request.action,
         arguments=arguments,
         summary=summary,
-        action_token=action_token(request),
+        action_token=action_tokens.action_token(
+            request, user_id=user_id, idempotency_key=idempotency_key, expires_at=expires_at
+        ),
+        idempotency_key=idempotency_key,
+        expires_at=expires_at,
         calculated={key: str(value) for key, value in derived.items()},
     )
 
 
-def execute(db: Session, request: WriteAction) -> ActionExecutionResult:
+def execute_uncommitted(db: Session, request: WriteAction) -> ActionExecutionResult:
     if request.confirmed is not True:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "confirmed=true is required")
     # The caller's preview is never trusted: recheck references and quantities now.
@@ -147,8 +153,7 @@ def execute(db: Session, request: WriteAction) -> ActionExecutionResult:
     model, id_field = _WRITE_TARGETS[request.action]
     instance = model(**request.arguments.model_dump(), **derived)
     db.add(instance)
-    commit_or_conflict(db, "Action conflicts with related records")
-    db.refresh(instance)
+    db.flush()
     result = request.arguments.model_dump(mode="json", exclude_none=True)
     result.update({key: str(value) for key, value in derived.items()})
     result[id_field] = getattr(instance, id_field)
@@ -159,6 +164,17 @@ def execute(db: Session, request: WriteAction) -> ActionExecutionResult:
         result=result,
         message="Con đã ghi lại rồi ạ.",
     )
+
+
+def execute(db: Session, request: WriteAction) -> ActionExecutionResult:
+    """Standalone wrapper retained for internal callers and existing tests."""
+    try:
+        result = execute_uncommitted(db, request)
+        commit_or_conflict(db, "Action conflicts with related records")
+        return result
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Action conflicts with related records") from exc
 
 
 def _find(db: Session, model: type, name_column, id_column, name: str | None):

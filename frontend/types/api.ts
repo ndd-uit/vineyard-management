@@ -7,6 +7,8 @@ export type PendingAction = {
   arguments: Record<string, unknown>;
   summary: string;
   action_token: string;
+  idempotency_key: string;
+  expires_at: string;
   calculated: Record<string, unknown>;
   requires_confirmation: boolean;
 };

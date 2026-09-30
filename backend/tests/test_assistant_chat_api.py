@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,6 +16,7 @@ from app.database import Base, get_db
 from app.auth import AuthenticatedUser, get_current_user
 from app.main import app
 from app.models import (
+    AssistantActionExecution,
     Customer,
     Expense,
     Garden,
@@ -53,7 +55,7 @@ def say(message):
 
 @pytest.fixture
 def api(monkeypatch):
-    monkeypatch.setattr(action_tokens, "recent_actions", action_tokens.RecentActionCache())
+    monkeypatch.setenv("ASSISTANT_ACTION_SIGNING_KEY", "test-only-signing-key-at-least-32-bytes")
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -301,7 +303,7 @@ def test_confirmation_does_not_need_gemini_configuration(api, monkeypatch):
                 harvest_date=date(2026, 9, 2),
                 quantity_kg=Decimal("2.00"),
             ),
-        )).model_dump(mode="json")
+        ), user_id="test-user").model_dump(mode="json")
     monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("GEMINI_MODEL", "")
     app.dependency_overrides.pop(get_chat_provider, None)
@@ -476,7 +478,7 @@ def test_action_token_blocks_duplicate_confirmation_and_tampering(api):
     ids = seed(engine)
     use_provider(FakeProvider(tool("record_expense", season_id=ids["season_id"], expense_date="2026-09-02", category="Phân bón", amount="10.00")))
     pending = chat(client, "Mua phân 10 đồng").json()["pending_action"]
-    assert len(pending["action_token"]) == 64
+    assert pending["action_token"].startswith("v1.")
     assert count(engine, Expense) == 0
 
     altered = {**pending, "arguments": {**pending["arguments"], "amount": "20.00"}}
@@ -503,9 +505,154 @@ def test_action_token_blocks_duplicate_confirmation_and_tampering(api):
     assert first.json()["type"] == "ACTION_EXECUTED"
     assert count(engine, Expense) == 1
     repeated = chat(client, "xác nhận", pending_action=pending)
-    assert repeated.json()["type"] == "MESSAGE"
+    assert repeated.json()["type"] == "ACTION_EXECUTED"
+    assert repeated.json()["data"] == first.json()["data"]
     assert "đã được lưu" in repeated.json()["message"]
     assert count(engine, Expense) == 1
+
+
+def test_durable_replay_survives_new_client_and_returns_original_result(api):
+    client, engine = api
+    use_provider(FakeProvider())
+    pending = chat(client, "Tạo vườn A").json()["pending_action"]
+    first = chat(client, "có", pending_action=pending).json()
+    with TestClient(app) as restarted_client:
+        second = chat(restarted_client, "có", pending_action=pending).json()
+    assert second["type"] == "ACTION_EXECUTED"
+    assert second["data"] == first["data"]
+    assert count(engine, Garden) == 1
+    assert count(engine, AssistantActionExecution) == 1
+
+
+def test_identical_new_previews_are_independently_executable(api):
+    client, engine = api
+    use_provider(FakeProvider())
+    first = chat(client, "Tạo vườn A").json()["pending_action"]
+    second = chat(client, "Tạo vườn A").json()["pending_action"]
+    assert first["idempotency_key"] != second["idempotency_key"]
+    assert first["action_token"] != second["action_token"]
+    assert chat(client, "có", pending_action=first).json()["type"] == "ACTION_EXECUTED"
+    assert chat(client, "có", pending_action=second).json()["type"] == "ACTION_EXECUTED"
+    assert count(engine, Garden) == 2
+    assert count(engine, AssistantActionExecution) == 2
+
+
+def test_tampered_key_expiry_and_wrong_authenticated_user_are_rejected(api):
+    client, engine = api
+    use_provider(FakeProvider())
+    pending = chat(client, "Tạo vườn A").json()["pending_action"]
+    changed_key = {**pending, "idempotency_key": str(uuid4())}
+    assert chat(client, "có", pending_action=changed_key).json()["type"] == "CLARIFICATION"
+    expired = {**pending, "expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()}
+    assert chat(client, "có", pending_action=expired).json()["type"] == "CLARIFICATION"
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(sub="other-user")
+    assert chat(client, "có", pending_action=pending).json()["type"] == "CLARIFICATION"
+    assert count(engine, Garden) == 0
+    assert count(engine, AssistantActionExecution) == 0
+
+
+def test_validly_signed_but_expired_preview_is_rejected(api):
+    client, engine = api
+    use_provider(FakeProvider())
+    pending = chat(client, "Tạo vườn A").json()["pending_action"]
+    from app.schemas.assistant_actions import CreateGarden, GardenArguments
+
+    expired_at = datetime.now(UTC) - timedelta(seconds=1)
+    action = CreateGarden(action="create_garden", arguments=GardenArguments(garden_name="A"))
+    expired = {**pending, "expires_at": expired_at.isoformat(), "action_token": action_tokens.action_token(
+        action, user_id="test-user", idempotency_key=UUID(pending["idempotency_key"]),
+        expires_at=expired_at,
+    )}
+    assert chat(client, "có", pending_action=expired).json()["type"] == "CLARIFICATION"
+    assert count(engine, Garden) == 0
+
+
+def test_missing_signing_key_fails_closed(api, monkeypatch):
+    client, engine = api
+    use_provider(FakeProvider())
+    monkeypatch.delenv("ASSISTANT_ACTION_SIGNING_KEY")
+    assert chat(client, "Tạo vườn A").status_code == 503
+    assert count(engine, Garden) == 0
+
+
+def test_reused_key_with_different_signed_payload_is_conflict(api):
+    client, engine = api
+    use_provider(FakeProvider())
+    pending = chat(client, "Tạo vườn A").json()["pending_action"]
+    assert chat(client, "có", pending_action=pending).json()["type"] == "ACTION_EXECUTED"
+    from app.schemas.assistant_actions import CreateGarden, GardenArguments
+
+    altered_action = CreateGarden(action="create_garden", arguments=GardenArguments(garden_name="B"))
+    altered = {
+        **pending,
+        "arguments": {"garden_name": "B"},
+        "action_token": action_tokens.action_token(
+            altered_action, user_id="test-user", idempotency_key=UUID(pending["idempotency_key"]),
+            expires_at=datetime.fromisoformat(pending["expires_at"]),
+        ),
+    }
+    assert chat(client, "có", pending_action=altered).json()["type"] == "CLARIFICATION"
+    assert count(engine, Garden) == 1
+    assert count(engine, AssistantActionExecution) == 1
+
+
+def test_same_key_is_scoped_to_authenticated_user(api):
+    client, engine = api
+    use_provider(FakeProvider())
+    first = chat(client, "Tạo vườn A").json()["pending_action"]
+    assert chat(client, "có", pending_action=first).json()["type"] == "ACTION_EXECUTED"
+    from app.schemas.assistant_actions import CreateGarden, GardenArguments
+
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(sub="other-user")
+    action = CreateGarden(action="create_garden", arguments=GardenArguments(garden_name="A"))
+    second = {**first, "action_token": action_tokens.action_token(
+        action, user_id="other-user", idempotency_key=UUID(first["idempotency_key"]),
+        expires_at=datetime.fromisoformat(first["expires_at"]),
+    )}
+    assert chat(client, "có", pending_action=second).json()["type"] == "ACTION_EXECUTED"
+    assert count(engine, Garden) == 2
+    assert count(engine, AssistantActionExecution) == 2
+
+
+def test_business_failure_rolls_back_claim_and_allows_retry(api, monkeypatch):
+    client, engine = api
+    use_provider(FakeProvider())
+    pending = chat(client, "Tạo vườn A").json()["pending_action"]
+    from app.services import assistant_actions
+
+    original = assistant_actions.execute_uncommitted
+
+    def fail_after_flush(db, action):
+        original(db, action)
+        raise RuntimeError("simulated failure after business flush")
+
+    monkeypatch.setattr(assistant_actions, "execute_uncommitted", fail_after_flush)
+    assert chat(client, "có", pending_action=pending).status_code == 503
+    assert count(engine, Garden) == 0
+    assert count(engine, AssistantActionExecution) == 0
+    monkeypatch.setattr(assistant_actions, "execute_uncommitted", original)
+    assert chat(client, "có", pending_action=pending).json()["type"] == "ACTION_EXECUTED"
+    assert count(engine, Garden) == 1
+
+
+def test_validation_failure_rolls_back_claim(api):
+    client, engine = api
+    ids = seed(engine)
+    use_provider(FakeProvider(tool(
+        "record_sale", harvest_id=ids["harvest_id"], customer_id=ids["customer_id"],
+        sale_date="2026-09-02", quantity_kg="10.00", unit_price="80000.00",
+    )))
+    pending = chat(client, "Bán 10 ký").json()["pending_action"]
+    from app.models import Sale
+
+    with Session(engine) as db:
+        db.add(Sale(harvest_id=ids["harvest_id"], customer_id=ids["customer_id"],
+                    sale_date=date(2026, 9, 2), quantity_kg=Decimal("95.00"),
+                    unit_price=Decimal("80000.00"), total_amount=Decimal("7600000.00")))
+        db.commit()
+    assert chat(client, "có", pending_action=pending).json()["type"] == "CLARIFICATION"
+    assert count(engine, AssistantActionExecution) == 0
+    assert count(engine, Sale) == 1
 
 
 def test_rejection_does_not_consume_action_token(api):
@@ -530,20 +677,7 @@ def test_action_token_uses_normalized_decimal_arguments():
     second = RecordExpense(action="record_expense", arguments=ExpenseArguments(
         season_id=1, expense_date=date(2026, 9, 2), category="Phân bón", amount=Decimal("10.00")
     ))
-    assert action_tokens.action_token(first) == action_tokens.action_token(second)
-
-
-def test_recent_action_cache_is_bounded_and_blocks_in_flight():
-    cache = action_tokens.RecentActionCache(max_entries=2)
-    assert cache.begin("one") == "new"
-    assert cache.begin("one") == "in_progress"
-    cache.finish("one")
-    assert cache.begin("one") == "executed"
-    assert cache.begin("two") == "new"
-    cache.finish("two")
-    assert cache.begin("three") == "new"
-    cache.finish("three")
-    assert cache.begin("one") == "new"
+    assert action_tokens.payload_hash(first) == action_tokens.payload_hash(second)
 
 
 @pytest.mark.parametrize(
@@ -596,7 +730,7 @@ def test_explicit_create_requires_confirmation_and_creates_once(api):
     confirmed = chat(client, "xác nhận", pending_action=pending)
     assert confirmed.json()["type"] == "ACTION_EXECUTED"
     assert count(engine, Customer) == 1
-    assert chat(client, "xác nhận", pending_action=pending).json()["type"] == "MESSAGE"
+    assert chat(client, "xác nhận", pending_action=pending).json()["type"] == "ACTION_EXECUTED"
     assert count(engine, Customer) == 1
 
 
@@ -669,7 +803,7 @@ def test_natural_confirmation_reuses_duplicate_token_protection(api):
     assert chat(client, "không", pending_action=pending).json()["type"] == "MESSAGE"
     assert count(engine, Garden) == 0
     assert chat(client, "Có!", pending_action=pending).json()["type"] == "ACTION_EXECUTED"
-    assert chat(client, "dạ có", pending_action=pending).json()["type"] == "MESSAGE"
+    assert chat(client, "dạ có", pending_action=pending).json()["type"] == "ACTION_EXECUTED"
     assert count(engine, Garden) == 1
 
 
@@ -684,7 +818,7 @@ def test_explicit_grape_variety_create_previews_without_gemini(api, message):
     assert count(engine, GrapeVariety) == 0
     assert len(provider.turns) == 1
     assert chat(client, "có", pending_action=preview["pending_action"]).json()["type"] == "ACTION_EXECUTED"
-    assert chat(client, "dạ có", pending_action=preview["pending_action"]).json()["type"] == "MESSAGE"
+    assert chat(client, "dạ có", pending_action=preview["pending_action"]).json()["type"] == "ACTION_EXECUTED"
     assert count(engine, GrapeVariety) == 1
 
 
@@ -719,7 +853,7 @@ def test_season_chat_resolves_garden_and_variety_before_preview(api):
     assert [name for name, _ in provider.feedback] == ["find_gardens", "find_grape_varieties"]
     assert count(engine, Season) == 1
     assert chat(client, "dạ có", pending_action=response["pending_action"]).json()["type"] == "ACTION_EXECUTED"
-    assert chat(client, "có", pending_action=response["pending_action"]).json()["type"] == "MESSAGE"
+    assert chat(client, "có", pending_action=response["pending_action"]).json()["type"] == "ACTION_EXECUTED"
     assert count(engine, Season) == 2
 
 
